@@ -1,0 +1,32 @@
+services:
+  arb-bot:
+    build: .
+    container_name: zephyr-arb-bot
+    env_file: .env
+    # Override CMD to pass your flags.
+    # In production, remove --dry-run and add your API keys.
+    command: >
+      --dry-run
+      --pairs BTC/USD:BTC/USDT,ETH/USD:ETH/USDT,SOL/USD:SOL/USDT,XRP/USD:XRP/USDT,ADA/USD:ADA/USDT,DOGE/USD:DOGE/USDT,LTC/USD:LTC/USDT,LINK/USD:LINK/USDT,DOT/USD:DOT/USDT,SHIB/USD:SHIB/USDT,AVAX/USD:AVAX/USDT,UNI/USD:UNI/USDT
+      --trade-amount-usd 100
+      --min-spread-pct 0.5
+      --log-level INFO
+    restart: unless-stopped
+
+    # Prevent logs from filling up the disk
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    # Mount a local data directory for persistent CSV logs
+    volumes:
+      - ./data:/app/data
+
+    # Resource limits (tune for your Lightsail instance)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
