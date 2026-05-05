@@ -1,17 +1,16 @@
 """
-Cross-pair spread arbitrage strategy engine.
+Market making strategy engine.
 
-Monitors price discrepancies between correlated trading pairs
-(e.g., BTC/USD vs BTC/USDT) and generates entry/exit signals
-when the spread exceeds configurable thresholds.
+Calculates optimal bid and ask quotes based on an inventory-skewing
+model (inspired by Avellaneda-Stoikov). Modifies quotes based on current
+exposure to keep portfolio balanced.
 
-This is a spot-only strategy — no futures or margin required.
-Fully legal for US Kraken users.
+This is a spot-only strategy.
 """
 
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from src.config import BotConfig
 from src.utils.logger import setup_logger, log_with_data
@@ -33,72 +32,33 @@ class OrderBookSnapshot:
             return (self.best_bid + self.best_ask) / 2.0
         return 0.0
 
-    @property
-    def spread_pct(self) -> float:
-        if self.best_bid:
-            return ((self.best_ask - self.best_bid) / self.best_bid) * 100
-        return 0.0
-
 
 @dataclass
-class ArbitragePosition:
-    """Tracks an open cross-pair spread arbitrage position."""
-    buy_symbol: str               # The symbol we bought (the cheaper one)
-    sell_symbol: str               # The symbol we sold (the more expensive one)
-    amount: float                  # Base asset quantity
-    buy_entry_price: float         # Price paid on the buy side
-    sell_entry_price: float        # Price received on the sell side
-    entry_spread_pct: float        # Spread at entry
-    entry_time: float              # Unix timestamp
-
-    @property
-    def entry_profit_usd(self) -> float:
-        """Gross profit at entry (before fees)."""
-        return (self.sell_entry_price - self.buy_entry_price) * self.amount
-
-    @property
-    def pair_key(self) -> str:
-        """Unique key for this spread pair (sorted for consistency)."""
-        symbols = sorted([self.buy_symbol, self.sell_symbol])
-        return f"{symbols[0]}:{symbols[1]}"
-
-
-@dataclass
-class SpreadSignal:
-    """Represents a detected spread opportunity or exit signal."""
-    symbol_a: str                 # First symbol in the pair
-    symbol_b: str                 # Second symbol in the pair
-    buy_symbol: str               # Which side is cheaper (buy this)
-    sell_symbol: str               # Which side is more expensive (sell this)
-    buy_ask: float                # Cost to buy (ask price of cheap side)
-    sell_bid: float               # Revenue from selling (bid price of expensive side)
-    spread_usd: float             # Absolute spread in USD
-    spread_pct: float             # Spread as % of buy price
-    net_of_fees_pct: float        # After deducting round-trip fees
-    is_entry: bool                # True if this is an entry signal
+class MarketMakerSignal:
+    """Represents the desired optimal quotes for a symbol."""
+    symbol: str
+    mid_price: float
+    reservation_price: float
+    buy_price: float
+    sell_price: float
+    inventory_delta: float
     timestamp: float
 
 
 class StrategyEngine:
     """
-    Core arbitrage logic for cross-pair spread trades.
+    Core logic for single-pair market making.
 
-    Monitors order books for correlated pairs, calculates spreads,
-    generates entry/exit signals, and tracks positions.
+    Monitors order books, computes fair value, skews fair value
+    based on inventory, and returns optimal limit order prices.
     """
 
     def __init__(self, config: BotConfig):
         self.config = config
         self.logger = setup_logger("zephyr.strategy", config.log_level)
 
-        # Use 0 fees if ignore_fees is set
-        self.taker_fee = 0.0 if config.ignore_fees else config.taker_fee
-
         # Latest order book data keyed by symbol
         self.books: Dict[str, OrderBookSnapshot] = {}
-
-        # Open arbitrage positions
-        self.positions: List[ArbitragePosition] = []
 
     def update_book(self, symbol: str, orderbook: Dict) -> None:
         """Update the latest order book snapshot for a symbol."""
@@ -114,162 +74,75 @@ class StrategyEngine:
                 timestamp=time.time(),
             )
 
-    def evaluate(self, symbol_a: str, symbol_b: str) -> Optional[SpreadSignal]:
+    def evaluate(
+        self,
+        symbol: str,
+        base_balance: float,
+        quote_balance: float,
+    ) -> Optional[MarketMakerSignal]:
         """
-        Evaluate whether there's a profitable spread between two symbols.
+        Evaluate optimal market making quotes for a symbol.
 
-        Checks both directions:
-          - Buy A at ask, Sell B at bid
-          - Buy B at ask, Sell A at bid
-        Returns the signal for the profitable direction (if any).
+        Args:
+            symbol: Trading pair like 'BTC/USD'
+            base_balance: Quantity of base asset held (e.g., BTC)
+            quote_balance: Quantity of quote asset held (e.g., USD)
 
         Returns:
-            SpreadSignal if prices are available, None otherwise
+            MarketMakerSignal if valid orderbook, else None
         """
-        book_a = self.books.get(symbol_a)
-        book_b = self.books.get(symbol_b)
-
-        if not book_a or not book_b:
+        book = self.books.get(symbol)
+        if not book or book.best_bid <= 0 or book.best_ask <= 0:
             return None
 
-        if book_a.best_ask <= 0 or book_b.best_ask <= 0:
-            return None
-        if book_a.best_bid <= 0 or book_b.best_bid <= 0:
-            return None
+        mid_price = book.mid_price
+        
+        # Calculate portfolio value and current base asset ratio
+        base_value_in_quote = base_balance * mid_price
+        total_portfolio_value = base_value_in_quote + quote_balance
 
-        # Direction 1: Buy A (at ask), Sell B (at bid)
-        spread_ab = book_b.best_bid - book_a.best_ask
-        spread_ab_pct = (spread_ab / book_a.best_ask) * 100
-
-        # Direction 2: Buy B (at ask), Sell A (at bid)
-        spread_ba = book_a.best_bid - book_b.best_ask
-        spread_ba_pct = (spread_ba / book_b.best_ask) * 100
-
-        # Pick the more profitable direction
-        if spread_ab_pct >= spread_ba_pct:
-            buy_symbol = symbol_a
-            sell_symbol = symbol_b
-            buy_ask = book_a.best_ask
-            sell_bid = book_b.best_bid
-            spread_usd = spread_ab
-            spread_pct = spread_ab_pct
+        if total_portfolio_value <= 0:
+            current_base_ratio = 0.0
         else:
-            buy_symbol = symbol_b
-            sell_symbol = symbol_a
-            buy_ask = book_b.best_ask
-            sell_bid = book_a.best_bid
-            spread_usd = spread_ba
-            spread_pct = spread_ba_pct
+            current_base_ratio = base_value_in_quote / total_portfolio_value
 
-        # Deduct round-trip fees
-        net_of_fees_pct = spread_pct - self.config.round_trip_fee_pct
+        # Target 50% in base, 50% in quote for delta-neutral market making
+        target_base_ratio = 0.5
 
-        # Check for entry signal
-        is_entry = (
-            net_of_fees_pct >= self.config.min_spread_pct
-            and not self._has_max_positions(symbol_a, symbol_b)
-        )
+        # Inventory delta ranges from roughly -1 (no base) to +1 (all base)
+        if target_base_ratio > 0:
+            inventory_delta = (current_base_ratio - target_base_ratio) / target_base_ratio
+        else:
+            inventory_delta = 0.0
 
-        return SpreadSignal(
-            symbol_a=symbol_a,
-            symbol_b=symbol_b,
-            buy_symbol=buy_symbol,
-            sell_symbol=sell_symbol,
-            buy_ask=buy_ask,
-            sell_bid=sell_bid,
-            spread_usd=spread_usd,
-            spread_pct=spread_pct,
-            net_of_fees_pct=net_of_fees_pct,
-            is_entry=is_entry,
+        # Calculate Reservation Price (Fair Value skewed by inventory)
+        # If we have too much base (inventory_delta > 0), we lower reservation price
+        # to attract buyers (sell orders more likely to fill) and discourage sellers.
+        skew = inventory_delta * self.config.inventory_risk_aversion
+        
+        # Cap the skew to avoid extreme quotes if balances are very imbalanced
+        skew = max(min(skew, 0.05), -0.05) # Max 5% skew
+        
+        reservation_price = mid_price * (1.0 - skew)
+
+        # Calculate Quotes
+        half_spread_pct = self.config.maker_base_spread_pct / 200.0  # e.g., 0.5% total spread -> 0.25% half spread
+        
+        buy_price = reservation_price * (1.0 - half_spread_pct)
+        sell_price = reservation_price * (1.0 + half_spread_pct)
+
+        # Ensure we don't cross the book aggressively (we are market makers, not takers)
+        # We must place buy orders below the best ask, and sell orders above the best bid.
+        # Ideally, buy <= best_bid and sell >= best_ask if we are passive.
+        buy_price = min(buy_price, book.best_ask * 0.9999)
+        sell_price = max(sell_price, book.best_bid * 1.0001)
+
+        return MarketMakerSignal(
+            symbol=symbol,
+            mid_price=mid_price,
+            reservation_price=reservation_price,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            inventory_delta=inventory_delta,
             timestamp=time.time(),
         )
-
-    def check_exit_signals(self) -> List[ArbitragePosition]:
-        """
-        Check if any open positions should be closed.
-
-        Exit conditions:
-        - Spread has compressed below exit_spread_pct (captured enough profit)
-        - Spread has inverted (the position is now losing money)
-        """
-        exits = []
-
-        for position in self.positions:
-            book_buy = self.books.get(position.buy_symbol)
-            book_sell = self.books.get(position.sell_symbol)
-
-            if not book_buy or not book_sell:
-                continue
-
-            # To close: sell the bought side at bid, buy back the sold side at ask
-            # Close spread = (what we get for selling bought asset) - (what we pay to buy back sold asset)
-            close_revenue = book_buy.best_bid   # Sell the asset we bought
-            close_cost = book_sell.best_ask      # Buy back the asset we sold
-
-            # Current spread from the perspective of the *closing* trade
-            # If we entered buying A and selling B:
-            #   Entry profit direction: sell_bid_B - buy_ask_A > 0
-            #   Current close cost direction: we sell A at bid, buy B at ask
-            #   Remaining spread = sell_bid_B(now) - buy_ask_A(now)
-            #   But for exit, we want to know the current live spread in the
-            #   same direction as entry
-            current_live_spread = book_sell.best_bid - book_buy.best_ask
-            current_spread_pct = (current_live_spread / book_buy.best_ask) * 100 if book_buy.best_ask > 0 else 0
-
-            # Exit if spread has compressed enough
-            if current_spread_pct <= self.config.exit_spread_pct:
-                log_with_data(
-                    self.logger, "info",
-                    "Exit signal: spread compressed",
-                    buy_symbol=position.buy_symbol,
-                    sell_symbol=position.sell_symbol,
-                    entry_spread_pct=round(position.entry_spread_pct, 4),
-                    current_spread_pct=round(current_spread_pct, 4),
-                )
-                exits.append(position)
-                continue
-
-            # Exit if spread has inverted significantly (losing money)
-            if current_spread_pct < -1.0:
-                log_with_data(
-                    self.logger, "warning",
-                    "Exit signal: spread inverted (stop-loss)",
-                    buy_symbol=position.buy_symbol,
-                    sell_symbol=position.sell_symbol,
-                    current_spread_pct=round(current_spread_pct, 4),
-                )
-                exits.append(position)
-
-        return exits
-
-    def add_position(self, position: ArbitragePosition) -> None:
-        """Record a new arbitrage position."""
-        self.positions.append(position)
-        log_with_data(
-            self.logger, "info",
-            "Position opened",
-            buy_symbol=position.buy_symbol,
-            sell_symbol=position.sell_symbol,
-            amount=position.amount,
-            buy_price=position.buy_entry_price,
-            sell_price=position.sell_entry_price,
-            spread_pct=round(position.entry_spread_pct, 4),
-        )
-
-    def remove_position(self, position: ArbitragePosition) -> None:
-        """Remove a closed position."""
-        if position in self.positions:
-            self.positions.remove(position)
-            log_with_data(
-                self.logger, "info",
-                "Position closed",
-                buy_symbol=position.buy_symbol,
-                sell_symbol=position.sell_symbol,
-                amount=position.amount,
-            )
-
-    def _has_max_positions(self, symbol_a: str, symbol_b: str) -> bool:
-        """Check if we've reached max positions for a spread pair."""
-        pair_key = ":".join(sorted([symbol_a, symbol_b]))
-        count = sum(1 for p in self.positions if p.pair_key == pair_key)
-        return count >= self.config.max_positions_per_pair

@@ -1,38 +1,37 @@
-# ⚡ Zephyr — Cross-Pair Spread Arbitrage Bot
+# ⚡ Zephyr — Market Making Bot
 
-Zephyr is a high-performance, Dockerized trading bot that monitors and executes **cross-pair spread arbitrage** on the **Kraken** exchange.
+Zephyr is a high-performance, Dockerized trading bot that acts as an automated **market maker** on the **Kraken** exchange.
 
-Because futures and margin trading are heavily restricted for US residents, this bot is designed to be **100% US-legal**. It uses a spot-only strategy, trading mispricings between correlated pairs (like `BTC/USD` and `BTC/USDT`).
+Because futures and margin trading are heavily restricted for US residents, this bot is designed to be **100% US-legal**. It uses a spot-only strategy, placing limit orders around the mid-price of altcoins to capture the bid-ask spread.
 
-It uses open-source libraries (`ccxt` + `websockets`) to stream data via Kraken's WebSocket API v2 and execute dual-leg spot trades simultaneously.
+It uses open-source libraries (`ccxt` + `websockets`) to stream data via Kraken's WebSocket API v2 and execute dual-leg spot limit orders simultaneously.
 
-## 🧠 Strategy: Cross-Pair Spread
+## 🧠 Strategy: Inventory-Skewed Market Making
 
-Instead of trading spot against futures (which requires margin), Zephyr monitors two closely correlated spot pairs. 
+Instead of trading spot against futures (which requires margin), Zephyr provides liquidity on a single spot pair (e.g., `SOL/USD`).
 
-For example, `BTC/USD` and `BTC/USDT` should technically have the exact same price (assuming 1 USD = 1 USDT). However, due to temporary liquidity imbalances on Kraken, their prices often diverge.
+It uses an advanced algorithm inspired by **Avellaneda-Stoikov**, continuously tracking the optimal "fair value" (reservation price) and adjusting quotes based on your current inventory.
 
 **How it works:**
-1. **Monitor**: The bot streams live order book data for both pairs via WebSockets.
-2. **Evaluate**: It calculates the spread in both directions:
-   - Buy `BTC/USD`, Sell `BTC/USDT`
-   - Buy `BTC/USDT`, Sell `BTC/USD`
-3. **Execute (Entry)**: If the spread exceeds the `min-spread-pct` (after accounting for Kraken's taker fees), it simultaneously places a market buy on the cheaper pair and a market sell on the more expensive pair.
-4. **Execute (Exit)**: It holds the position until the spread compresses back to equilibrium (the `exit-spread-pct`), at which point it reverses the trades to capture the profit.
+1. **Monitor**: The bot streams live order book data and account balances.
+2. **Evaluate (Fair Value)**: It calculates the mid-price and calculates your "inventory delta" (how much your base vs quote balance deviates from a target 50/50 ratio).
+3. **Evaluate (Skew)**: It skews the reservation price down if you hold too much inventory (attracting buyers) and up if you hold too little (attracting sellers), actively managing risk.
+4. **Execute (Quote)**: It places limit Buy and Sell orders around the reservation price based on your configured `--maker-base-spread-pct`.
+5. **Execute (Refresh)**: If the market moves away from your limit orders by more than your `--order-refresh-tolerance-pct`, it automatically cancels the stale orders and quotes new optimal prices.
 
 ## ✨ Features
+- **Advanced Pricing Logic**: Dynamic, inventory-aware quoting that minimizes directional risk.
 - **100% Free Libraries**: Built entirely on free, open-source libraries (`ccxt`, `websockets`, `asyncio`). No paid enterprise licenses needed.
 - **US-Legal**: Uses only spot trading on Kraken, fully compliant with US regulations for retail traders.
 - **High-Frequency Websockets**: Uses Kraken's WebSocket v2 API for millisecond-latency order book updates.
-- **Simultaneous Execution**: Wraps `ccxt` REST API calls in `asyncio.gather` threads to execute both legs of the arbitrage simultaneously.
-- **Safety First**: Defaults to `--dry-run` mode. Extensive balance and fill-price validation.
+- **Safety First**: Defaults to `--dry-run` mode. Automatic cancellation of open orders on shutdown.
 - **Dockerized**: Ready to deploy on a $5/mo AWS Lightsail instance (runs on <512MB RAM).
 
 ---
 
 ## 🚀 Local Testing & Simulation (Dry-Run)
 
-The easiest and safest way to test Zephyr is via Docker in **Dry-Run Mode**. The bot connects to Kraken's WebSockets, evaluates spreads, and logs "theoretical" trades without requiring an API key or risking real money.
+The easiest and safest way to test Zephyr is via Docker in **Dry-Run Mode**. The bot connects to Kraken's WebSockets, evaluates optimal limit prices, and tracks "theoretical" orders without requiring an API key or risking real money.
 
 ### 1. Setup
 ```bash
@@ -47,19 +46,11 @@ To run the bot in the background:
 docker compose up --build -d
 ```
 
-### 3. Monitor Executed Trades
-The bot generates a lot of data. To filter the logs and see **only** the executed trades (entries and exits) in real-time, run this in a new terminal window:
+### 3. Monitor Quotes
+The bot generates log data for its quoting logic. To see the bot calculating its skew and placing simulated limit orders:
 ```bash
-docker compose logs -f | grep "EXECUTED"
+docker compose logs -f | grep "Updating quotes"
 ```
-
-### 4. View the Trade Ledger (CSV)
-Every completed trade (even dry-runs) is automatically saved to a persistent CSV file. You can open this file in Excel or Numbers to track your theoretical P&L:
-```bash
-# View the trades ledger
-cat data/trades.csv
-```
-Columns include `total_pnl_usd`, `hold_time_sec`, and the exact entry/exit prices.
 
 ---
 
@@ -96,8 +87,8 @@ Once you are satisfied with the dry-run simulations, you can deploy the bot to A
    # KRAKEN_API_SECRET=your_secret
    ```
 2. Open `docker-compose.yml` (`nano docker-compose.yml`) to configure your strategy:
-   - **For Dry-Run (Recommended First Step)**: Leave the `--dry-run` flag in the `command` section. This is highly recommended to verify your server's connection to Kraken and monitor theoretical trades without risking funds.
-   - **For Live Trading**: **Remove the `--dry-run` flag** from the `command` section. You can also adjust your `--trade-amount-usd` and `--min-spread-pct` here.
+   - **For Dry-Run (Recommended First Step)**: Leave the `--dry-run` flag in the `command` section. This is highly recommended to verify your server's connection to Kraken.
+   - **For Live Trading**: **Remove the `--dry-run` flag** from the `command` section.
 
 ### 4. Run in the Background
 Start the bot in "detached" mode so it keeps running after you close your SSH connection:
@@ -107,8 +98,7 @@ docker compose up --build -d
 
 ### 5. Managing Your Bot
 The configuration is already optimized with memory limits (512MB) and log rotation (max 150MB) to ensure it never crashes your Lightsail server.
-- **View Live Trades**: `docker compose logs -f | grep "EXECUTED"`
-- **View Trade History**: `cat data/trades.csv`
+- **View Live Logs**: `docker compose logs -f`
 - **Stop the Bot**: `docker compose down`
 
 ---
@@ -120,11 +110,12 @@ You can customize the bot's behavior in the `docker-compose.yml` `command` secti
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dry-run` | `False` | Monitor opportunities and log them without placing real orders. |
-| `--ignore-fees` | `False` | Pretend Kraken fees are 0.00% (useful for testing small spreads). |
-| `--pairs` | `BTC/USD:BTC/USDT...` | Comma-separated list of spread pairs. Format: `PairA:PairB`. |
-| `--trade-amount-usd`| `100.0` | USD notional amount to trade per leg. |
-| `--min-spread-pct` | `0.5` | Minimum spread percentage (after fees) required to enter a trade. |
-| `--max-positions` | `1` | Max concurrent open arbitrage positions per spread pair. |
+| `--ignore-fees` | `False` | Pretend Kraken fees are 0.00% (useful for testing). |
+| `--symbols` | `SOL/USD,DOGE/USD` | Comma-separated list of symbols to market make on. |
+| `--trade-amount-usd`| `100.0` | USD notional amount per limit order. |
+| `--maker-base-spread-pct` | `0.5` | Base target spread (ask - bid) as a %. |
+| `--inventory-risk-aversion` | `0.1` | How aggressively to skew quotes based on inventory imbalance. |
+| `--order-refresh-tolerance-pct`| `0.05`| Re-quote if optimal price moves more than this % away from current order. |
 | `--log-level` | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 
 ## 🧪 Running Tests

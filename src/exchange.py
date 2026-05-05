@@ -317,65 +317,85 @@ class ExchangeClient:
             None, lambda: func(*args, **kwargs)
         )
 
-    async def create_market_buy(self, symbol: str, amount: float) -> Dict:
+    async def create_limit_buy(self, symbol: str, amount: float, price: float) -> Dict:
         """
-        Place a market buy order.
+        Place a limit buy order.
 
         Args:
             symbol: Trading pair like 'BTC/USD'
             amount: Quantity of base asset to buy
+            price: Limit price
 
         Returns:
             Order response dict
         """
-        self.logger.info(f"Placing MARKET BUY: {amount} {symbol}")
+        self.logger.info(f"Placing LIMIT BUY: {amount} {symbol} @ {price}")
         order = await self._run_sync(
             self.exchange.create_order,
             symbol=symbol,
-            type="market",
+            type="limit",
             side="buy",
             amount=amount,
+            price=price,
         )
         log_with_data(
             self.logger, "info",
-            "Buy order placed",
+            "Buy limit order placed",
             order_id=order.get("id"),
             symbol=symbol,
             amount=amount,
-            avg_price=order.get("average"),
+            price=price,
             status=order.get("status"),
         )
         return order
 
-    async def create_market_sell(self, symbol: str, amount: float) -> Dict:
+    async def create_limit_sell(self, symbol: str, amount: float, price: float) -> Dict:
         """
-        Place a market sell order.
+        Place a limit sell order.
 
         Args:
             symbol: Trading pair like 'BTC/USD'
             amount: Quantity of base asset to sell
+            price: Limit price
 
         Returns:
             Order response dict
         """
-        self.logger.info(f"Placing MARKET SELL: {amount} {symbol}")
+        self.logger.info(f"Placing LIMIT SELL: {amount} {symbol} @ {price}")
         order = await self._run_sync(
             self.exchange.create_order,
             symbol=symbol,
-            type="market",
+            type="limit",
             side="sell",
             amount=amount,
+            price=price,
         )
         log_with_data(
             self.logger, "info",
-            "Sell order placed",
+            "Sell limit order placed",
             order_id=order.get("id"),
             symbol=symbol,
             amount=amount,
-            avg_price=order.get("average"),
+            price=price,
             status=order.get("status"),
         )
         return order
+
+    async def cancel_order(self, id: str, symbol: str) -> Dict:
+        """Cancel an open order."""
+        self.logger.info(f"Cancelling order {id} for {symbol}")
+        return await self._run_sync(
+            self.exchange.cancel_order,
+            id=id,
+            symbol=symbol,
+        )
+
+    async def fetch_open_orders(self, symbol: str = None) -> List[Dict]:
+        """Fetch open orders."""
+        return await self._run_sync(
+            self.exchange.fetch_open_orders,
+            symbol=symbol,
+        )
 
     async def fetch_balance(self) -> Dict:
         """Fetch account balance."""

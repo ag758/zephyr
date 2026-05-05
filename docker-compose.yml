@@ -1,30 +1,32 @@
 services:
-  arb-bot:
+  bot:
     build: .
-    container_name: zephyr-arb-bot
+    container_name: zephyr-bot
     env_file: .env
-    # Override CMD to pass your flags.
-    # In production, remove --dry-run and add your API keys.
+    # Main configuration block. 
+    # You can override any of these in your .env file using the ZEPHYR_ prefix.
     command: >
-      --dry-run
-      --pairs BTC/USD:BTC/USDT,ETH/USD:ETH/USDT,SOL/USD:SOL/USDT,XRP/USD:XRP/USDT,ADA/USD:ADA/USDT,DOGE/USD:DOGE/USDT,LTC/USD:LTC/USDT,LINK/USD:LINK/USDT,DOT/USD:DOT/USDT,SHIB/USD:SHIB/USDT,AVAX/USD:AVAX/USDT,UNI/USD:UNI/USDT
-      --trade-amount-usd 100
-      --min-spread-pct 0.5
-      --log-level INFO
+      ${ZEPHYR_DRY_RUN_FLAG:---dry-run}
+      --symbols ${ZEPHYR_SYMBOLS:-SOL/USD}
+      --trade-amount-usd ${ZEPHYR_TRADE_AMOUNT:-100}
+      --maker-base-spread-pct ${ZEPHYR_BASE_SPREAD:-0.5}
+      --inventory-risk-aversion ${ZEPHYR_RISK_AVERSION:-0.1}
+      --order-refresh-tolerance-pct ${ZEPHYR_REFRESH_TOLERANCE:-0.05}
+      --dry-run-balance-usd ${ZEPHYR_DRY_RUN_BALANCE:-10000.0}
+      --log-level ${ZEPHYR_LOG_LEVEL:-INFO}
     restart: unless-stopped
 
-    # Prevent logs from filling up the disk
     logging:
       driver: "json-file"
       options:
         max-size: "50m"
         max-file: "3"
 
-    # Mount a local data directory for persistent CSV logs
+    # Persistent storage for your trades.csv
     volumes:
       - ./data:/app/data
 
-    # Resource limits (tune for your Lightsail instance)
+    # Resource limits to ensure stability on low-memory instances
     deploy:
       resources:
         limits:

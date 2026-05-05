@@ -1,5 +1,5 @@
 """
-Zephyr — Cross-Pair Spread Arbitrage Bot
+Zephyr — Market Making Bot
 
 Entry point with CLI argument parsing.
 Initializes the exchange, strategy, executor, and monitor,
@@ -8,9 +8,10 @@ then launches the async WebSocket event loop.
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
-from typing import List, Tuple
+from typing import List
 
 from src.config import BotConfig
 from src.exchange import ExchangeClient
@@ -24,17 +25,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="zephyr",
         description=(
-            "Cross-pair spread arbitrage bot for Kraken using CCXT and websockets. "
-            "Monitors mispricing between correlated pairs and auto-executes spot-only trades."
+            "Inventory-skewed market making bot for Kraken using CCXT and websockets. "
+            "Places limit orders around the mid-price to capture spread."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Monitor-only (no trades)
-  python -m src.main --dry-run --pairs BTC/USD:BTC/USDT,ETH/USD:ETH/USDT
+  python -m src.main --dry-run --symbols SOL/USD,DOGE/USD
 
   # Production (REAL MONEY — use with caution)
-  python -m src.main --api-key KEY --api-secret SECRET --pairs BTC/USD:BTC/USDT
+  python -m src.main --api-key KEY --api-secret SECRET --symbols SOL/USD --trade-amount-usd 50
         """,
     )
 
@@ -69,28 +70,40 @@ Examples:
 
     # --- Trading parameters ---
     parser.add_argument(
-        "--pairs",
+        "--symbols",
         type=str,
-        default="BTC/USD:BTC/USDT,ETH/USD:ETH/USDT",
-        help="Comma-separated spread pairs to monitor, colon separated within pair. Default: BTC/USD:BTC/USDT,ETH/USD:ETH/USDT",
+        default="SOL/USD,DOGE/USD",
+        help="Comma-separated symbols to market make on. Default: SOL/USD,DOGE/USD",
     )
     parser.add_argument(
         "--trade-amount-usd",
         type=float,
         default=100.0,
-        help="USD notional amount per trade leg. Default: 100",
+        help="USD notional amount per limit order. Default: 100",
     )
     parser.add_argument(
-        "--min-spread-pct",
+        "--maker-base-spread-pct",
         type=float,
         default=0.5,
-        help="Minimum spread %% (after fees) to trigger entry. Default: 0.5",
+        help="Base target spread (ask - bid) as a %%. Default: 0.5",
     )
     parser.add_argument(
-        "--max-positions",
-        type=int,
-        default=1,
-        help="Maximum concurrent arbitrage positions per pair. Default: 1",
+        "--inventory-risk-aversion",
+        type=float,
+        default=0.1,
+        help="How aggressively to skew quotes based on inventory imbalance. Default: 0.1",
+    )
+    parser.add_argument(
+        "--order-refresh-tolerance-pct",
+        type=float,
+        default=0.05,
+        help="Re-quote if optimal price moves more than this %% away from current order. Default: 0.05",
+    )
+    parser.add_argument(
+        "--dry-run-balance-usd",
+        type=float,
+        default=10000.0,
+        help="Starting USD for paper trading simulation. Default: 10000",
     )
 
     # --- Logging ---
@@ -106,24 +119,35 @@ Examples:
 
 
 def build_config(args: argparse.Namespace) -> BotConfig:
-    """Convert parsed CLI arguments to a BotConfig."""
-    spread_pairs: List[Tuple[str, str]] = []
-    pairs_str = [p.strip() for p in args.pairs.split(",") if p.strip()]
-    for p in pairs_str:
-        parts = p.split(":")
-        if len(parts) == 2:
-            spread_pairs.append((parts[0].strip(), parts[1].strip()))
+    """
+    Convert parsed CLI arguments to a BotConfig, with environment variable overrides.
+    Priority: Environment Variable > CLI Argument > Default
+    """
+    def get_env_bool(name: str, default: bool) -> bool:
+        val = os.getenv(name)
+        if val is None: return default
+        return val.lower() in ("true", "1", "yes")
+
+    def get_env_float(name: str, default: float) -> float:
+        val = os.getenv(name)
+        return float(val) if val else default
+
+    # Symbols: Environment variable ZEPHYR_SYMBOLS or CLI --symbols
+    symbols_str = os.getenv("ZEPHYR_SYMBOLS", args.symbols)
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
 
     return BotConfig(
-        api_key=args.api_key,
-        api_secret=args.api_secret,
-        dry_run=args.dry_run,
-        ignore_fees=args.ignore_fees,
-        spread_pairs=spread_pairs,
-        trade_amount_usd=args.trade_amount_usd,
-        min_spread_pct=args.min_spread_pct,
-        max_positions_per_pair=args.max_positions,
-        log_level=args.log_level,
+        api_key=os.getenv("ZEPHYR_API_KEY", args.api_key),
+        api_secret=os.getenv("ZEPHYR_API_SECRET", args.api_secret),
+        dry_run=get_env_bool("ZEPHYR_DRY_RUN", args.dry_run),
+        ignore_fees=get_env_bool("ZEPHYR_IGNORE_FEES", args.ignore_fees),
+        symbols=symbols,
+        trade_amount_usd=get_env_float("ZEPHYR_TRADE_AMOUNT", args.trade_amount_usd),
+        maker_base_spread_pct=get_env_float("ZEPHYR_BASE_SPREAD", args.maker_base_spread_pct),
+        inventory_risk_aversion=get_env_float("ZEPHYR_RISK_AVERSION", args.inventory_risk_aversion),
+        order_refresh_tolerance_pct=get_env_float("ZEPHYR_REFRESH_TOLERANCE", args.order_refresh_tolerance_pct),
+        dry_run_balance_usd=get_env_float("ZEPHYR_DRY_RUN_BALANCE", args.dry_run_balance_usd),
+        log_level=os.getenv("ZEPHYR_LOG_LEVEL", args.log_level),
     )
 
 
@@ -133,7 +157,7 @@ async def run(config: BotConfig) -> None:
 
     # Print banner
     logger.info("=" * 60)
-    logger.info("  ⚡ ZEPHYR — Cross-Pair Spread Arbitrage Bot")
+    logger.info("  ⚡ ZEPHYR — Market Making Bot")
     logger.info("=" * 60)
     logger.info(f"  Config: {config}")
     logger.info("=" * 60)
@@ -182,24 +206,23 @@ async def run(config: BotConfig) -> None:
                 await task
             except asyncio.CancelledError:
                 pass
+                
+        # Optional: Cancel open orders on shutdown
+        if not config.dry_run:
+            logger.info("Cancelling open orders on shutdown...")
+            for symbol, active in executor.active_orders.items():
+                if active.buy_order_id:
+                    try:
+                        await exchange.cancel_order(active.buy_order_id, symbol)
+                    except Exception as e:
+                        logger.error(f"Failed to cancel buy order {active.buy_order_id}: {e}")
+                if active.sell_order_id:
+                    try:
+                        await exchange.cancel_order(active.sell_order_id, symbol)
+                    except Exception as e:
+                        logger.error(f"Failed to cancel sell order {active.sell_order_id}: {e}")
 
-        # Log final status
-        if strategy.positions:
-            log_with_data(
-                logger, "warning",
-                "Shutting down with open positions!",
-                open_positions=len(strategy.positions),
-                positions=[
-                    {
-                        "buy_symbol": p.buy_symbol,
-                        "sell_symbol": p.sell_symbol,
-                        "amount": p.amount,
-                    }
-                    for p in strategy.positions
-                ],
-            )
-        else:
-            logger.info("Shutdown complete. No open positions.")
+        logger.info("Shutdown complete.")
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")

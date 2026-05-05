@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
 # Set labels for the image
-LABEL maintainer="zephyr-arb"
-LABEL description="Cross-pair spread arbitrage bot for Kraken"
+LABEL maintainer="zephyr-bot"
+LABEL description="Inventory-skewed market making bot for Kraken"
 
 # Prevent Python from writing .pyc files and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1

@@ -1,5 +1,5 @@
 """
-Structured logging setup for the arbitrage bot.
+Structured logging setup for the market making bot.
 
 Provides JSON-formatted log output with contextual fields
 for easy parsing and monitoring in Docker/cloud environments.

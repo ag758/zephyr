@@ -1,26 +1,24 @@
 """
-Configuration dataclass for the arbitrage bot.
+Configuration dataclass for the market making bot.
 
 Centralizes all runtime configuration, provides validation,
 and computes derived values like fee estimates.
 
-Designed for Kraken cross-pair spread arbitrage (spot-only, US-legal).
+Designed for Kraken single-pair market making with inventory skewing.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List
 
 
 # Kraken fee schedule (as of 2025)
-# Regular tier taker fee: 0.26% (decreases with volume)
-# Maker fee: 0.16%
-# We use taker fees as worst-case for market orders
-DEFAULT_TAKER_FEE = 0.0026  # 0.26%
+# Regular tier maker fee: 0.16%
+DEFAULT_MAKER_FEE = 0.0016  # 0.16%
 
 
 @dataclass
 class BotConfig:
-    """Runtime configuration for the cross-pair spread arbitrage bot."""
+    """Runtime configuration for the market making bot."""
 
     # --- Exchange credentials ---
     api_key: str = ""
@@ -31,19 +29,21 @@ class BotConfig:
     ignore_fees: bool = False   # Pretend fees are 0% for testing
 
     # --- Trading parameters ---
-    # Each spread pair is a tuple of (symbol_a, symbol_b) to monitor
-    # e.g., ("BTC/USD", "BTC/USDT") — buy cheap side, sell expensive side
-    spread_pairs: List[Tuple[str, str]] = field(
-        default_factory=lambda: [("BTC/USD", "BTC/USDT"), ("ETH/USD", "ETH/USDT")]
+    # List of symbols to market make on
+    symbols: List[str] = field(
+        default_factory=lambda: ["SOL/USD", "DOGE/USD"]
     )
 
-    trade_amount_usd: float = 100.0       # USD notional per trade leg
-    min_spread_pct: float = 0.5           # Minimum spread % (after fees) to trigger entry
-    max_positions_per_pair: int = 1       # Max concurrent arb positions per spread pair
-    exit_spread_pct: float = 0.05         # Close when spread compresses to this %
+    trade_amount_usd: float = 100.0       # USD notional per limit order
+    
+    # Market Making Parameters
+    maker_base_spread_pct: float = 0.5    # Base target spread (ask - bid) as a %
+    inventory_risk_aversion: float = 0.1  # How aggressively to skew quotes based on inventory imbalance
+    order_refresh_tolerance_pct: float = 0.05 # Re-quote if optimal price moves more than this % away from current order
+    dry_run_balance_usd: float = 10000.0   # Starting USD for paper trading simulation
 
     # --- Fee estimates ---
-    taker_fee: float = DEFAULT_TAKER_FEE  # Per-leg taker fee
+    maker_fee: float = DEFAULT_MAKER_FEE
 
     # --- Monitoring ---
     log_level: str = "INFO"
@@ -61,46 +61,28 @@ class BotConfig:
         if self.trade_amount_usd <= 0:
             raise ValueError("Trade amount must be positive.")
 
-        if not self.spread_pairs:
-            raise ValueError("At least one spread pair must be specified.")
+        if not self.symbols:
+            raise ValueError("At least one symbol must be specified.")
 
-        for pair in self.spread_pairs:
-            if len(pair) != 2:
+        for symbol in self.symbols:
+            if "/" not in symbol:
                 raise ValueError(
-                    f"Invalid spread pair {pair}. Each pair must have exactly 2 symbols."
+                    f"Invalid symbol format '{symbol}'. Expected format: 'BTC/USD'"
                 )
-            for symbol in pair:
-                if "/" not in symbol:
-                    raise ValueError(
-                        f"Invalid symbol format '{symbol}'. Expected format: 'BTC/USD'"
-                    )
 
     @property
     def all_symbols(self) -> List[str]:
         """Get a flat list of all unique symbols to monitor."""
-        symbols = set()
-        for a, b in self.spread_pairs:
-            symbols.add(a)
-            symbols.add(b)
-        return sorted(symbols)
-
-    @property
-    def round_trip_fee_pct(self) -> float:
-        """
-        Total estimated round-trip fee percentage.
-        Includes: buy taker fee + sell taker fee (two spot legs).
-        """
-        if self.ignore_fees:
-            return 0.0
-        return self.taker_fee * 2 * 100
+        return sorted(list(set(self.symbols)))
 
     def __str__(self) -> str:
         exec_str = "DRY-RUN" if self.dry_run else "LIVE"
-        pairs_str = ", ".join(f"{a}↔{b}" for a, b in self.spread_pairs)
+        sym_str = ", ".join(self.symbols)
         return (
             f"BotConfig({exec_str} | "
-            f"pairs=[{pairs_str}] | "
-            f"trade_amount=${self.trade_amount_usd} | "
-            f"min_spread={self.min_spread_pct}% | "
-            f"round_trip_fees={self.round_trip_fee_pct:.3f}%)"
+            f"symbols=[{sym_str}] | "
+            f"order_size=${self.trade_amount_usd} | "
+            f"dry_run_bal=${self.dry_run_balance_usd} | "
+            f"base_spread={self.maker_base_spread_pct}% | "
+            f"risk_aversion={self.inventory_risk_aversion})"
         )

@@ -1,8 +1,8 @@
 """
-Unit tests for the cross-pair spread strategy engine.
+Unit tests for the market making strategy engine.
 
-Tests spread calculation, fee deduction,
-entry/exit signal logic, and position tracking.
+Tests order book mid-price calculation, inventory skew logic,
+reservation price calculation, and config validation.
 """
 
 import time
@@ -11,8 +11,7 @@ from src.config import BotConfig
 from src.strategy import (
     StrategyEngine,
     OrderBookSnapshot,
-    ArbitragePosition,
-    SpreadSignal,
+    MarketMakerSignal,
 )
 
 
@@ -23,13 +22,13 @@ from src.strategy import (
 def make_config(**overrides) -> BotConfig:
     """Create a test config with sensible defaults."""
     defaults = {
-        "spread_pairs": [("BTC/USD", "BTC/USDT")],
-        "min_spread_pct": 0.5,
+        "symbols": ["SOL/USD"],
         "trade_amount_usd": 100.0,
-        "taker_fee": 0.0026,  # 0.26%
+        "maker_base_spread_pct": 0.5,
+        "inventory_risk_aversion": 0.1,
+        "order_refresh_tolerance_pct": 0.05,
         "dry_run": True,
         "log_level": "ERROR",  # Suppress logs in tests
-        "exit_spread_pct": 0.05,
     }
     defaults.update(overrides)
     return BotConfig(**defaults)
@@ -44,257 +43,144 @@ def make_orderbook(best_bid: float, best_ask: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Spread Calculation Tests
+# OrderBook Snapshot Tests
 # ---------------------------------------------------------------------------
 
-class TestSpreadCalculation:
-    def test_positive_spread_direction_ab(self):
-        """Symbol B is more expensive than Symbol A."""
-        config = make_config()
-        engine = StrategyEngine(config)
-
-        # A is cheap: 50000 bid / 50010 ask
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        # B is expensive: 50500 bid / 50510 ask
-        engine.update_book("BTC/USDT", make_orderbook(50500, 50510))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
-
-        assert signal is not None
-        assert signal.buy_symbol == "BTC/USD"
-        assert signal.sell_symbol == "BTC/USDT"
-        
-        # spread = sell_bid - buy_ask = 50500 - 50010 = 490
-        assert signal.spread_usd == pytest.approx(490.0, abs=0.01)
-        assert signal.spread_pct > 0
-
-    def test_positive_spread_direction_ba(self):
-        """Symbol A is more expensive than Symbol B."""
-        config = make_config()
-        engine = StrategyEngine(config)
-
-        # A is expensive: 50500 bid / 50510 ask
-        engine.update_book("BTC/USD", make_orderbook(50500, 50510))
-        # B is cheap: 50000 bid / 50010 ask
-        engine.update_book("BTC/USDT", make_orderbook(50000, 50010))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
-
-        assert signal is not None
-        assert signal.buy_symbol == "BTC/USDT"
-        assert signal.sell_symbol == "BTC/USD"
-        
-        # spread = sell_bid - buy_ask = 50500 - 50010 = 490
-        assert signal.spread_usd == pytest.approx(490.0, abs=0.01)
-        assert signal.spread_pct > 0
-
-    def test_negative_spread(self):
-        """No profitable spread in either direction."""
-        config = make_config()
-        engine = StrategyEngine(config)
-
-        # Tight, overlapping markets
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(49995, 50005))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
-
-        assert signal is not None
-        assert signal.spread_usd < 0
-        assert signal.spread_pct < 0
-        assert signal.is_entry is False
-
-    def test_zero_spread(self):
-        """When prices are identical, spread is negative (due to bid/ask difference)."""
-        config = make_config()
-        engine = StrategyEngine(config)
-
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(50000, 50010))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
-
-        assert signal is not None
-        # buy at 50010, sell at 50000 -> -10 USD spread
-        assert signal.spread_usd == pytest.approx(-10.0, abs=0.01)
-        assert signal.is_entry is False
-
-
-# ---------------------------------------------------------------------------
-# Fee Deduction Tests
-# ---------------------------------------------------------------------------
-
-class TestFeeDeduction:
-    def test_round_trip_fee(self):
-        """Round-trip fee should include two taker fees."""
-        config = make_config(taker_fee=0.0026)
-        # 0.26% * 2 = 0.52%
-        assert config.round_trip_fee_pct == pytest.approx(0.52, abs=0.001)
-
-    def test_fees_reduce_signal(self):
-        """Net % should be less than gross by the fee amount."""
-        config = make_config(min_spread_pct=0.0) 
-        engine = StrategyEngine(config)
-
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(51000, 51010))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
-
-        assert signal is not None
-        assert signal.net_of_fees_pct < signal.spread_pct
-        assert signal.spread_pct - signal.net_of_fees_pct == pytest.approx(
-            config.round_trip_fee_pct, abs=0.001
+class TestOrderBookSnapshot:
+    def test_mid_price(self):
+        snap = OrderBookSnapshot(
+            symbol="SOL/USD",
+            best_bid=100.0,
+            best_ask=102.0,
         )
+        assert snap.mid_price == 101.0
+
+    def test_mid_price_missing_data(self):
+        snap = OrderBookSnapshot(symbol="SOL/USD", best_bid=100.0, best_ask=0.0)
+        assert snap.mid_price == 0.0
 
 
 # ---------------------------------------------------------------------------
-# Entry Signal Tests
+# Inventory Skew Tests
 # ---------------------------------------------------------------------------
 
-class TestEntrySignals:
-    def test_entry_above_threshold(self):
-        """Should signal entry when net spread exceeds min_spread_pct."""
-        config = make_config(min_spread_pct=0.1, taker_fee=0.001) # Net threshold 0.1%, fee 0.2% round trip
+class TestInventorySkew:
+    def test_perfect_balance(self):
+        """When base ratio is exactly 50%, reservation price equals mid price."""
+        config = make_config(inventory_risk_aversion=0.1)
         engine = StrategyEngine(config)
 
-        # > 1% spread 
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(50600, 50610))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
+        engine.update_book("SOL/USD", make_orderbook(99.0, 101.0))  # Mid = 100.0
+        
+        # 1 SOL * 100 USD/SOL = $100 base value.
+        # $100 quote balance. Total portfolio = $200. Ratio = 50%.
+        signal = engine.evaluate("SOL/USD", base_balance=1.0, quote_balance=100.0)
 
         assert signal is not None
-        assert signal.is_entry is True
+        assert signal.inventory_delta == pytest.approx(0.0)
+        assert signal.reservation_price == pytest.approx(100.0)
 
-    def test_no_entry_below_threshold(self):
-        """Should NOT signal entry when spread is below threshold."""
-        config = make_config(min_spread_pct=5.0)  # High threshold
+    def test_long_base_asset(self):
+        """When holding too much base asset, reservation price should be skewed lower."""
+        config = make_config(inventory_risk_aversion=0.1)
         engine = StrategyEngine(config)
 
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(50100, 50110))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
+        engine.update_book("SOL/USD", make_orderbook(99.0, 101.0))  # Mid = 100.0
+        
+        # 2 SOL * 100 USD/SOL = $200 base value.
+        # $0 quote balance. Total portfolio = $200. Ratio = 100%. Target is 50%.
+        # Inventory delta = (1.0 - 0.5) / 0.5 = 1.0
+        # Skew = 1.0 * 0.1 = 0.1 (capped at 0.05)
+        # Reservation price = 100.0 * (1.0 - 0.05) = 95.0
+        signal = engine.evaluate("SOL/USD", base_balance=2.0, quote_balance=0.0)
 
         assert signal is not None
-        assert signal.is_entry is False
+        assert signal.inventory_delta == pytest.approx(1.0)
+        assert signal.reservation_price == pytest.approx(95.0)
 
-    def test_no_entry_at_max_positions(self):
-        """Should NOT signal entry if max positions are already open."""
-        config = make_config(min_spread_pct=0.1, max_positions_per_pair=1)
+    def test_short_base_asset(self):
+        """When holding too little base asset, reservation price should be skewed higher."""
+        config = make_config(inventory_risk_aversion=0.1)
         engine = StrategyEngine(config)
 
-        # Add an existing position
-        engine.add_position(ArbitragePosition(
-            buy_symbol="BTC/USD",
-            sell_symbol="BTC/USDT",
-            amount=0.001,
-            buy_entry_price=50000,
-            sell_entry_price=50500,
-            entry_spread_pct=1.0,
-            entry_time=time.time(),
-        ))
-
-        # Even with a great spread, should not trigger
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(55000, 55010))
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
+        engine.update_book("SOL/USD", make_orderbook(99.0, 101.0))  # Mid = 100.0
+        
+        # 0 SOL * 100 USD/SOL = $0 base value.
+        # $200 quote balance. Total portfolio = $200. Ratio = 0%. Target is 50%.
+        # Inventory delta = (0.0 - 0.5) / 0.5 = -1.0
+        # Skew = -1.0 * 0.1 = -0.1 (capped at -0.05)
+        # Reservation price = 100.0 * (1.0 - -0.05) = 105.0
+        signal = engine.evaluate("SOL/USD", base_balance=0.0, quote_balance=200.0)
 
         assert signal is not None
-        assert signal.is_entry is False
-
-
-# ---------------------------------------------------------------------------
-# Exit Signal Tests
-# ---------------------------------------------------------------------------
-
-class TestExitSignals:
-    def test_exit_on_spread_compression(self):
-        config = make_config(exit_spread_pct=0.05)
-        engine = StrategyEngine(config)
+        assert signal.inventory_delta == pytest.approx(-1.0)
+        assert signal.reservation_price == pytest.approx(105.0)
         
-        position = ArbitragePosition(
-            buy_symbol="BTC/USD",
-            sell_symbol="BTC/USDT",
-            amount=0.001,
-            buy_entry_price=50000,
-            sell_entry_price=50500,
-            entry_spread_pct=1.0,
-            entry_time=time.time(),
-        )
-        engine.add_position(position)
-        
-        # Spread is completely closed (prices are identical)
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        engine.update_book("BTC/USDT", make_orderbook(50000, 50010))
-        
-        exits = engine.check_exit_signals()
-        assert len(exits) == 1
-        assert exits[0] == position
-        
-    def test_exit_on_spread_inversion(self):
-        config = make_config()
-        engine = StrategyEngine(config)
-        
-        position = ArbitragePosition(
-            buy_symbol="BTC/USD",
-            sell_symbol="BTC/USDT",
-            amount=0.001,
-            buy_entry_price=50000,
-            sell_entry_price=50500,
-            entry_spread_pct=1.0,
-            entry_time=time.time(),
-        )
-        engine.add_position(position)
-        
-        # Spread has inverted completely (stop loss scenario)
-        engine.update_book("BTC/USD", make_orderbook(52000, 52010))
-        engine.update_book("BTC/USDT", make_orderbook(50000, 50010))
-        
-        exits = engine.check_exit_signals()
-        assert len(exits) == 1
-
-
-# ---------------------------------------------------------------------------
-# Position Tracking Tests
-# ---------------------------------------------------------------------------
-
-class TestPositionTracking:
-    def test_add_remove_position(self):
-        config = make_config()
+    def test_skew_capping(self):
+        """Skew should be capped at 5% maximum to prevent extreme quotes."""
+        # Risk aversion is very high
+        config = make_config(inventory_risk_aversion=1.0)
         engine = StrategyEngine(config)
 
-        position = ArbitragePosition(
-            buy_symbol="BTC/USD",
-            sell_symbol="BTC/USDT",
-            amount=0.002,
-            buy_entry_price=50000,
-            sell_entry_price=50500,
-            entry_spread_pct=1.0,
-            entry_time=time.time(),
-        )
-        engine.add_position(position)
-
-        assert len(engine.positions) == 1
-        assert engine.positions[0].buy_entry_price == 50000
+        engine.update_book("SOL/USD", make_orderbook(99.0, 101.0))  # Mid = 100.0
         
-        engine.remove_position(position)
-        assert len(engine.positions) == 0
+        # Inventory delta = 1.0
+        # Skew would normally be 1.0 * 1.0 = 1.0, but capped at 0.05
+        # Reservation price = 100.0 * (1.0 - 0.05) = 95.0
+        signal = engine.evaluate("SOL/USD", base_balance=2.0, quote_balance=0.0)
 
-    def test_entry_profit_usd(self):
-        position = ArbitragePosition(
-            buy_symbol="BTC/USD",
-            sell_symbol="BTC/USDT",
-            amount=0.1,
-            buy_entry_price=50000,
-            sell_entry_price=50500,
-            entry_spread_pct=1.0,
-            entry_time=time.time(),
-        )
-        # profit_usd = (50500 - 50000) * 0.1 = 50.0
-        assert position.entry_profit_usd == pytest.approx(50.0, abs=0.01)
+        assert signal is not None
+        assert signal.reservation_price == pytest.approx(95.0)
+
+
+# ---------------------------------------------------------------------------
+# Pricing Engine Tests
+# ---------------------------------------------------------------------------
+
+class TestPricingEngine:
+    def test_base_spread_application(self):
+        """Buy and sell prices should be equidistant from the reservation price."""
+        # 2% maker spread -> half spread is 1%
+        config = make_config(maker_base_spread_pct=2.0, inventory_risk_aversion=0.0)
+        engine = StrategyEngine(config)
+
+        # Mid = 100.0
+        engine.update_book("SOL/USD", make_orderbook(99.0, 101.0))
+        signal = engine.evaluate("SOL/USD", base_balance=1.0, quote_balance=100.0)
+
+        assert signal is not None
+        assert signal.reservation_price == pytest.approx(100.0)
+        
+        # Since reservation is 100, and half spread is 1%, buy should be 99, sell should be 101
+        assert signal.buy_price == pytest.approx(99.0)
+        assert signal.sell_price == pytest.approx(101.0)
+
+    def test_passive_execution_capping(self):
+        """Bot should never aggressively cross the order book."""
+        # 0.2% maker spread -> half spread is 0.1%
+        config = make_config(maker_base_spread_pct=0.2, inventory_risk_aversion=0.0)
+        engine = StrategyEngine(config)
+
+        # The book has a tight spread: 99.9 bid, 100.1 ask. Mid is 100.
+        engine.update_book("SOL/USD", make_orderbook(99.9, 100.1))
+        
+        # Intended buy price: 100 * (1 - 0.001) = 99.9
+        # Intended sell price: 100 * (1 + 0.001) = 100.1
+        # This is exactly the book, which is fine.
+        signal = engine.evaluate("SOL/USD", base_balance=1.0, quote_balance=100.0)
+        assert signal.buy_price <= 100.1
+        assert signal.sell_price >= 99.9
+        
+        # Now artificially skew it higher so that the intended buy price crosses the ask
+        config.inventory_risk_aversion = 0.5
+        # 0 balance, so it wants to buy aggressively.
+        # Skew = -1 * 0.5 = -0.5. Capped at -0.05.
+        # Reservation price = 105.
+        # Buy price = 105 * 0.999 = 104.895
+        # But best_ask is 100.1, so buy_price should be capped at 100.1 * 0.9999 = 100.08999
+        signal = engine.evaluate("SOL/USD", base_balance=0.0, quote_balance=100.0)
+        assert signal.reservation_price == pytest.approx(105.0)
+        assert signal.buy_price == pytest.approx(100.1 * 0.9999)
 
 
 # ---------------------------------------------------------------------------
@@ -307,18 +193,7 @@ class TestEdgeCases:
         config = make_config()
         engine = StrategyEngine(config)
 
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
-        assert signal is None
-
-    def test_partial_data_returns_none(self):
-        """Evaluate should return None when only one side has data."""
-        config = make_config()
-        engine = StrategyEngine(config)
-
-        engine.update_book("BTC/USD", make_orderbook(50000, 50010))
-        # No BTC/USDT data
-
-        signal = engine.evaluate("BTC/USD", "BTC/USDT")
+        signal = engine.evaluate("SOL/USD", base_balance=100.0, quote_balance=100.0)
         assert signal is None
 
     def test_empty_orderbook_handled(self):
@@ -326,23 +201,20 @@ class TestEdgeCases:
         config = make_config()
         engine = StrategyEngine(config)
 
-        engine.update_book("BTC/USD", {"bids": [], "asks": []})
+        engine.update_book("SOL/USD", {"bids": [], "asks": []})
+        assert "SOL/USD" not in engine.books
 
-        assert "BTC/USD" not in engine.books
+    def test_zero_portfolio_value(self):
+        """Should handle completely empty portfolio gracefully."""
+        config = make_config()
+        engine = StrategyEngine(config)
 
-    def test_orderbook_snapshot_properties(self):
-        """Test OrderBookSnapshot computed properties."""
-        snap = OrderBookSnapshot(
-            symbol="BTC/USD",
-            best_bid=50000,
-            best_ask=50100,
-            best_bid_size=1.5,
-            best_ask_size=2.0,
-            timestamp=time.time(),
-        )
-
-        assert snap.mid_price == pytest.approx(50050.0, abs=0.01)
-        assert snap.spread_pct == pytest.approx(0.2, abs=0.01)  # 100/50000 * 100
+        engine.update_book("SOL/USD", make_orderbook(99.0, 101.0))
+        
+        # Both balances 0
+        signal = engine.evaluate("SOL/USD", base_balance=0.0, quote_balance=0.0)
+        assert signal is not None
+        assert signal.inventory_delta == pytest.approx(-1.0) # Treats it as short base
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +236,12 @@ class TestConfigValidation:
         config.validate()  # Should not raise
 
     def test_invalid_symbol_format(self):
-        config = make_config(spread_pairs=[("BTCUSD", "BTC/USDT")])
+        config = make_config(symbols=["BTCUSD"])
         with pytest.raises(ValueError, match="Invalid symbol format"):
             config.validate()
+            
+    def test_negative_trade_amount(self):
+        config = make_config(trade_amount_usd=-10)
+        with pytest.raises(ValueError, match="positive"):
+            config.validate()
+
