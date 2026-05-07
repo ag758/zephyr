@@ -6,13 +6,13 @@ services:
     # Main configuration block. 
     # You can override any of these in your .env file using the ZEPHYR_ prefix.
     command: >
-      ${ZEPHYR_DRY_RUN_FLAG:---dry-run}
       --symbols ${ZEPHYR_SYMBOLS:-SOL/USD}
       --trade-amount-usd ${ZEPHYR_TRADE_AMOUNT:-100}
       --maker-base-spread-pct ${ZEPHYR_BASE_SPREAD:-0.5}
       --inventory-risk-aversion ${ZEPHYR_RISK_AVERSION:-0.1}
       --order-refresh-tolerance-pct ${ZEPHYR_REFRESH_TOLERANCE:-0.05}
-      --dry-run-balance-usd ${ZEPHYR_DRY_RUN_BALANCE:-10000.0}
+      --test-balance-usd ${ZEPHYR_TEST_BALANCE:-10000.0}
+      --maker-fee-pct ${ZEPHYR_MAKER_FEE:-0.16}
       --log-level ${ZEPHYR_LOG_LEVEL:-INFO}
     restart: unless-stopped
 

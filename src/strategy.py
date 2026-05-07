@@ -8,6 +8,7 @@ exposure to keep portfolio balanced.
 This is a spot-only strategy.
 """
 
+import collections
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -59,20 +60,30 @@ class StrategyEngine:
 
         # Latest order book data keyed by symbol
         self.books: Dict[str, OrderBookSnapshot] = {}
+        
+        # Price history for volatility and trend calculations
+        self.price_history: Dict[str, collections.deque] = collections.defaultdict(
+            lambda: collections.deque(maxlen=120)  # Roughly 2 minutes at 1 tick/sec
+        )
 
     def update_book(self, symbol: str, orderbook: Dict) -> None:
         """Update the latest order book snapshot for a symbol."""
         bids = orderbook.get("bids", [])
         asks = orderbook.get("asks", [])
         if bids and asks:
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
             self.books[symbol] = OrderBookSnapshot(
                 symbol=symbol,
-                best_bid=bids[0][0],
-                best_ask=asks[0][0],
+                best_bid=best_bid,
+                best_ask=best_ask,
                 best_bid_size=bids[0][1],
                 best_ask_size=asks[0][1],
                 timestamp=time.time(),
             )
+            # Store mid price history
+            mid_price = (best_bid + best_ask) / 2.0
+            self.price_history[symbol].append(mid_price)
 
     def evaluate(
         self,
@@ -96,6 +107,29 @@ class StrategyEngine:
             return None
 
         mid_price = book.mid_price
+        history = self.price_history.get(symbol, [])
+        
+        # 1. Trend Filter (Adverse Selection Protection)
+        # Prevent buying if there's a sharp downtrend.
+        trend_buy_block = False
+        if len(history) >= 60:
+            sma = sum(history) / len(history)
+            # If current price is >0.2% below recent average, it's a sharp drop
+            if mid_price < sma * 0.998:
+                trend_buy_block = True
+                self.logger.warning(f"Trend block active for {symbol}. Mid: {mid_price}, SMA: {sma}")
+
+        # 2. Volatility-Adjusted Spreads
+        vol_multiplier = 1.0
+        if len(history) >= 10:
+            highest = max(history)
+            lowest = min(history)
+            volatility_pct = (highest - lowest) / mid_price
+            # Scale spread. E.g., if range is 1%, volatility_pct is 0.01.
+            # Base spread * (1 + 100 * 0.01) = Base * 2.
+            vol_multiplier = max(1.0, 1.0 + (volatility_pct * 100.0))
+            
+        current_spread_pct = self.config.maker_base_spread_pct * vol_multiplier
         
         # Calculate portfolio value and current base asset ratio
         base_value_in_quote = base_balance * mid_price
@@ -115,10 +149,10 @@ class StrategyEngine:
         else:
             inventory_delta = 0.0
 
-        # Calculate Reservation Price (Fair Value skewed by inventory)
-        # If we have too much base (inventory_delta > 0), we lower reservation price
-        # to attract buyers (sell orders more likely to fill) and discourage sellers.
-        skew = inventory_delta * self.config.inventory_risk_aversion
+        # 3. Non-Linear Inventory Decay
+        # Use delta * abs(delta) to create a curve that is flat near 0 and steep near 1/-1.
+        # Multiplied by 2 to ensure it still reaches a strong skew at extremes.
+        skew = inventory_delta * abs(inventory_delta) * self.config.inventory_risk_aversion * 2.0
         
         # Cap the skew to avoid extreme quotes if balances are very imbalanced
         skew = max(min(skew, 0.05), -0.05) # Max 5% skew
@@ -126,16 +160,28 @@ class StrategyEngine:
         reservation_price = mid_price * (1.0 - skew)
 
         # Calculate Quotes
-        half_spread_pct = self.config.maker_base_spread_pct / 200.0  # e.g., 0.5% total spread -> 0.25% half spread
+        half_spread_pct = current_spread_pct / 200.0
         
         buy_price = reservation_price * (1.0 - half_spread_pct)
         sell_price = reservation_price * (1.0 + half_spread_pct)
 
-        # Ensure we don't cross the book aggressively (we are market makers, not takers)
-        # We must place buy orders below the best ask, and sell orders above the best bid.
-        # Ideally, buy <= best_bid and sell >= best_ask if we are passive.
-        buy_price = min(buy_price, book.best_ask * 0.9999)
-        sell_price = max(sell_price, book.best_bid * 1.0001)
+        # 4. Strict Passive Rebalancing
+        # Ensure we NEVER cross the mid-price in LIVE mode to avoid taker fees.
+        if self.config.live:
+            buy_price = min(buy_price, mid_price * 0.9995)
+            sell_price = max(sell_price, mid_price * 1.0005)
+            
+            # Also respect the actual order book
+            buy_price = min(buy_price, book.best_bid)
+            sell_price = max(sell_price, book.best_ask)
+        else:
+            # In TEST MODE, we allow the bot to "touch" the other side to trigger fills
+            buy_price = min(buy_price, book.best_ask)
+            sell_price = max(sell_price, book.best_bid)
+
+        if trend_buy_block:
+            # Drop the buy price extremely low so it doesn't get filled
+            buy_price = mid_price * 0.5
 
         return MarketMakerSignal(
             symbol=symbol,

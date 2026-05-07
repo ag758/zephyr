@@ -55,10 +55,15 @@ Examples:
 
     # --- Mode flags ---
     parser.add_argument(
-        "--dry-run",
+        "--live",
         action="store_true",
-        default=False,
-        help="Monitor and log opportunities without placing any orders.",
+        help="Enable LIVE trading mode. If not passed, bot defaults to safe TEST MODE.",
+    )
+    parser.add_argument(
+        "--test-balance-usd",
+        type=float,
+        default=10000.0,
+        help="Initial USD balance for simulation (when NOT in live mode).",
     )
 
     parser.add_argument(
@@ -105,6 +110,12 @@ Examples:
         default=10000.0,
         help="Starting USD for paper trading simulation. Default: 10000",
     )
+    parser.add_argument(
+        "--maker-fee-pct",
+        type=float,
+        default=0.16,
+        help="Kraken maker fee as a percentage (e.g., 0.16 for 0.16%). Default: 0.16",
+    )
 
     # --- Logging ---
     parser.add_argument(
@@ -136,17 +147,22 @@ def build_config(args: argparse.Namespace) -> BotConfig:
     symbols_str = os.getenv("ZEPHYR_SYMBOLS", args.symbols)
     symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
 
+    # Mode: Environment variable ZEPHYR_LIVE or CLI --live
+    # Defaults to TEST MODE (False) if neither is set.
+    live = get_env_bool("ZEPHYR_LIVE", args.live)
+    
     return BotConfig(
         api_key=os.getenv("ZEPHYR_API_KEY", args.api_key),
         api_secret=os.getenv("ZEPHYR_API_SECRET", args.api_secret),
-        dry_run=get_env_bool("ZEPHYR_DRY_RUN", args.dry_run),
+        live=live,
         ignore_fees=get_env_bool("ZEPHYR_IGNORE_FEES", args.ignore_fees),
         symbols=symbols,
         trade_amount_usd=get_env_float("ZEPHYR_TRADE_AMOUNT", args.trade_amount_usd),
         maker_base_spread_pct=get_env_float("ZEPHYR_BASE_SPREAD", args.maker_base_spread_pct),
         inventory_risk_aversion=get_env_float("ZEPHYR_RISK_AVERSION", args.inventory_risk_aversion),
         order_refresh_tolerance_pct=get_env_float("ZEPHYR_REFRESH_TOLERANCE", args.order_refresh_tolerance_pct),
-        dry_run_balance_usd=get_env_float("ZEPHYR_DRY_RUN_BALANCE", args.dry_run_balance_usd),
+        test_balance_usd=get_env_float("ZEPHYR_TEST_BALANCE", args.test_balance_usd),
+        maker_fee=get_env_float("ZEPHYR_MAKER_FEE", args.maker_fee_pct) / 100.0,
         log_level=os.getenv("ZEPHYR_LOG_LEVEL", args.log_level),
     )
 
@@ -208,7 +224,7 @@ async def run(config: BotConfig) -> None:
                 pass
                 
         # Optional: Cancel open orders on shutdown
-        if not config.dry_run:
+        if config.live:
             logger.info("Cancelling open orders on shutdown...")
             for symbol, active in executor.active_orders.items():
                 if active.buy_order_id:

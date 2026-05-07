@@ -96,11 +96,11 @@ class TradeExecutor:
             # Calculate trade amount in base units
             amount = self.config.trade_amount_usd / signal.mid_price
 
-            if self.config.dry_run:
+            if not self.config.live:
                 active.target_buy_price = signal.buy_price
                 active.target_sell_price = signal.sell_price
-                active.buy_order_id = "dry_run_buy"
-                active.sell_order_id = "dry_run_sell"
+                active.buy_order_id = "test_mode_buy"
+                active.sell_order_id = "test_mode_sell"
                 return
 
             # Cancel old orders if we are replacing them
@@ -145,7 +145,7 @@ class TradeExecutor:
         """
         active = self.active_orders[symbol]
 
-        if self.config.dry_run:
+        if not self.config.live:
             # Simulate fills based on current orderbook
             book = self.strategy.books.get(symbol)
             if not book:
@@ -154,14 +154,14 @@ class TradeExecutor:
             amount = self.config.trade_amount_usd / book.mid_price
             
             if active.buy_order_id and book.best_ask <= active.target_buy_price:
-                log_with_data(self.logger, "info", "DRY-RUN: Buy order filled", price=active.target_buy_price, symbol=symbol)
+                log_with_data(self.logger, "info", "TEST MODE: Buy order filled", price=active.target_buy_price, symbol=symbol)
                 self._log_trade_to_csv(symbol, "buy", active.target_buy_price, amount)
                 if self.on_fill:
                     self.on_fill(symbol, "buy", active.target_buy_price, amount)
                 active.buy_order_id = None
                 
             if active.sell_order_id and book.best_bid >= active.target_sell_price:
-                log_with_data(self.logger, "info", "DRY-RUN: Sell order filled", price=active.target_sell_price, symbol=symbol)
+                log_with_data(self.logger, "info", "TEST MODE: Sell order filled", price=active.target_sell_price, symbol=symbol)
                 self._log_trade_to_csv(symbol, "sell", active.target_sell_price, amount)
                 if self.on_fill:
                     self.on_fill(symbol, "sell", active.target_sell_price, amount)
@@ -197,12 +197,15 @@ class TradeExecutor:
         csv_path = "data/trades.csv"
         file_exists = os.path.isfile(csv_path)
 
+        cost = price * amount
+        fee = cost * self.config.maker_fee
+        
         try:
             with open(csv_path, mode="a", newline="") as f:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow([
-                        "time", "symbol", "side", "price", "amount", "notional_usd"
+                        "time", "symbol", "side", "price", "amount", "notional_usd", "fee_usd"
                     ])
 
                 writer.writerow([
@@ -211,7 +214,8 @@ class TradeExecutor:
                     side,
                     price,
                     round(amount, 8),
-                    round(price * amount, 2),
+                    round(cost, 2),
+                    round(fee, 4),
                 ])
         except Exception as e:
             self.logger.error(f"Failed to write to CSV: {e}")

@@ -25,7 +25,7 @@ class BotConfig:
     api_secret: str = ""
 
     # --- Mode flags ---
-    dry_run: bool = False       # Log only, don't execute trades
+    live: bool = False          # Execute real trades if True
     ignore_fees: bool = False   # Pretend fees are 0% for testing
 
     # --- Trading parameters ---
@@ -40,7 +40,7 @@ class BotConfig:
     maker_base_spread_pct: float = 0.5    # Base target spread (ask - bid) as a %
     inventory_risk_aversion: float = 0.1  # How aggressively to skew quotes based on inventory imbalance
     order_refresh_tolerance_pct: float = 0.05 # Re-quote if optimal price moves more than this % away from current order
-    dry_run_balance_usd: float = 10000.0   # Starting USD for paper trading simulation
+    test_balance_usd: float = 10000.0   # Starting USD for paper trading simulation
 
     # --- Fee estimates ---
     maker_fee: float = DEFAULT_MAKER_FEE
@@ -51,11 +51,11 @@ class BotConfig:
 
     def validate(self) -> None:
         """Validate configuration. Raises ValueError on invalid config."""
-        if not self.dry_run:
+        if self.live:
             if not self.api_key or not self.api_secret:
                 raise ValueError(
-                    "API key and secret are required for live trading. "
-                    "Use --dry-run for monitor-only mode."
+                    "API key and secret are required for LIVE trading. "
+                    "To run safely in TEST MODE, ensure the --live flag is NOT present in your .env or command."
                 )
 
         if self.trade_amount_usd <= 0:
@@ -76,13 +76,14 @@ class BotConfig:
         return sorted(list(set(self.symbols)))
 
     def __str__(self) -> str:
-        exec_str = "DRY-RUN" if self.dry_run else "LIVE"
+        exec_str = "LIVE" if self.live else "TEST MODE"
         sym_str = ", ".join(self.symbols)
         return (
             f"BotConfig({exec_str} | "
             f"symbols=[{sym_str}] | "
             f"order_size=${self.trade_amount_usd} | "
-            f"dry_run_bal=${self.dry_run_balance_usd} | "
+            f"test_bal=${self.test_balance_usd} | "
             f"base_spread={self.maker_base_spread_pct}% | "
-            f"risk_aversion={self.inventory_risk_aversion})"
+            f"risk_aversion={self.inventory_risk_aversion} | "
+            f"maker_fee={round(self.maker_fee * 100, 4)}%)"
         )

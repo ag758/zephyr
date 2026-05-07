@@ -40,9 +40,9 @@ class Monitor:
         
         self.balances: Dict[str, float] = {}
         
-        if self.config.dry_run:
+        if not self.config.live:
             # Initialize paper trading balances with the configured amount
-            self.balances["USD"] = self.config.dry_run_balance_usd
+            self.balances["USD"] = self.config.test_balance_usd
             # Starting with 0 base assets allows watching the initial accumulation phase
             for symbol in self.config.symbols:
                 base = symbol.split("/")[0]
@@ -90,7 +90,7 @@ class Monitor:
 
     async def _balance_loop(self) -> None:
         """Periodically fetch balance to update inventory for strategy engine."""
-        if self.config.dry_run:
+        if not self.config.live:
             return
 
         # Initial fetch
@@ -199,23 +199,28 @@ class Monitor:
 
     def _handle_fill(self, symbol: str, side: str, price: float, amount: float) -> None:
         """Update local simulated balances when a paper trade fills."""
-        if not self.config.dry_run:
+        if self.config.live:
             return
 
         base_asset = symbol.split("/")[0]
         quote_asset = symbol.split("/")[1]
         
         cost = price * amount
+        fee = cost * self.config.maker_fee
         
         if side == "buy":
-            self.balances[base_asset] = self.balances.get(base_asset, 0.0) + amount
+            # Kraken takes fee from the asset received (base)
+            fee_in_base = amount * self.config.maker_fee
+            self.balances[base_asset] = self.balances.get(base_asset, 0.0) + (amount - fee_in_base)
             self.balances[quote_asset] = self.balances.get(quote_asset, 0.0) - cost
         else:
+            # Kraken takes fee from the asset received (quote)
             self.balances[base_asset] = self.balances.get(base_asset, 0.0) - amount
-            self.balances[quote_asset] = self.balances.get(quote_asset, 0.0) + cost
+            self.balances[quote_asset] = self.balances.get(quote_asset, 0.0) + (cost - fee)
 
         log_with_data(
-            self.logger, "info", "Paper Balance Updated",
+            self.logger, "info", "Test Balance Updated (Fee Applied)",
             asset=base_asset, balance=round(self.balances[base_asset], 4),
-            quote=quote_asset, quote_balance=round(self.balances[quote_asset], 2)
+            quote=quote_asset, quote_balance=round(self.balances[quote_asset], 2),
+            fee_usd=round(fee, 4)
         )
