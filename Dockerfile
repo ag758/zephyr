@@ -17,12 +17,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY src/ ./src/
 
+# Create data directory for trade logs (before switching to non-root user)
+RUN mkdir -p /app/data
+
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash botuser
+RUN chown -R botuser:botuser /app/data
 USER botuser
 
 # Entry point — allows passing CLI flags via docker run
 ENTRYPOINT ["python", "-m", "src.main"]
 
-# Default: dry-run for safety
-CMD ["--dry-run", "--log-level", "INFO"]
+# Default: TEST MODE for safety (no --live flag = test mode)
+CMD ["--log-level", "INFO"]

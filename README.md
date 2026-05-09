@@ -20,7 +20,7 @@ Zephyr is a production-ready market-making engine for Kraken, optimized for high
    Open the `.env` file and configure your strategy. You do **not** need to edit `docker-compose.yml`.
 
 #### Option A: TEST MODE (Default)
-Use this to simulate trades with paper money.
+Use this to simulate trades with paper money. No API keys required.
 ```bash
 # API keys are optional in test mode
 ZEPHYR_API_KEY=
@@ -31,11 +31,12 @@ ZEPHYR_LIVE=False
 ZEPHYR_SYMBOLS=PEPE/USD
 ZEPHYR_TEST_BALANCE=500.0
 
-# Strategy (Aggressive for testing)
+# Strategy
 ZEPHYR_TRADE_AMOUNT=10.0
-ZEPHYR_BASE_SPREAD=0.01
-ZEPHYR_RISK_AVERSION=0.5
-ZEPHYR_REFRESH_TOLERANCE=0.2
+ZEPHYR_BASE_SPREAD=0.4
+ZEPHYR_RISK_AVERSION=0.05
+ZEPHYR_REFRESH_TOLERANCE=0.05
+ZEPHYR_MAKER_FEE=0.16
 ```
 
 #### Option B: LIVE MODE
@@ -49,11 +50,12 @@ ZEPHYR_API_SECRET=your_actual_secret
 ZEPHYR_LIVE=True
 ZEPHYR_SYMBOLS=PEPE/USD
 
-# Strategy (Patient for profit)
+# Strategy
 ZEPHYR_TRADE_AMOUNT=10.0
 ZEPHYR_BASE_SPREAD=0.4
 ZEPHYR_RISK_AVERSION=0.05
-ZEPHYR_REFRESH_TOLERANCE=0.1
+ZEPHYR_REFRESH_TOLERANCE=0.05
+ZEPHYR_MAKER_FEE=0.16
 ```
 
 ### 4. Run in the Background

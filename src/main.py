@@ -31,11 +31,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Monitor-only (no trades)
-  python -m src.main --dry-run --symbols SOL/USD,DOGE/USD
+  # Test mode (paper trading, no real money)
+  python -m src.main --symbols PEPE/USD --test-balance-usd 500
 
   # Production (REAL MONEY — use with caution)
-  python -m src.main --api-key KEY --api-secret SECRET --symbols SOL/USD --trade-amount-usd 50
+  python -m src.main --live --api-key KEY --api-secret SECRET --symbols PEPE/USD --trade-amount-usd 10
         """,
     )
 
@@ -70,7 +70,7 @@ Examples:
         "--ignore-fees",
         action="store_true",
         default=False,
-        help="Pretend fees are 0% for testing purposes.",
+        help="Pretend fees are 0 percent for testing purposes.",
     )
 
     # --- Trading parameters ---
@@ -90,7 +90,7 @@ Examples:
         "--maker-base-spread-pct",
         type=float,
         default=0.5,
-        help="Base target spread (ask - bid) as a %%. Default: 0.5",
+        help="Base target spread (ask - bid) as a percent. Default: 0.5",
     )
     parser.add_argument(
         "--inventory-risk-aversion",
@@ -102,19 +102,14 @@ Examples:
         "--order-refresh-tolerance-pct",
         type=float,
         default=0.05,
-        help="Re-quote if optimal price moves more than this %% away from current order. Default: 0.05",
+        help="Re-quote if optimal price moves more than this percent away from current order. Default: 0.05",
     )
-    parser.add_argument(
-        "--dry-run-balance-usd",
-        type=float,
-        default=10000.0,
-        help="Starting USD for paper trading simulation. Default: 10000",
-    )
+
     parser.add_argument(
         "--maker-fee-pct",
         type=float,
         default=0.16,
-        help="Kraken maker fee as a percentage (e.g., 0.16 for 0.16%). Default: 0.16",
+        help="Kraken maker fee as a percentage (e.g., 0.16 for 0.16 percent). Default: 0.16",
     )
 
     # --- Logging ---
